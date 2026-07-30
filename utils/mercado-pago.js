@@ -110,7 +110,13 @@ async function getAccountReportConfig() {
   try {
     return await mercadoPagoGet("/v1/account/settlement_report/config");
   } catch (error) {
-    if (error.status === 404) return null;
+    const configurationMissing =
+      error.status === 404 ||
+      (error.status === 400 &&
+        /config_not_found_for_user|configuration not found for user/i.test(
+          error.message || ""
+        ));
+    if (configurationMissing) return null;
     throw error;
   }
 }
