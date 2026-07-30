@@ -1,6 +1,6 @@
 {
   "name": "pix-esteira",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Backend Vercel para monitorar Pix recebidos no Mercado Pago",
   "engines": {
@@ -8,7 +8,7 @@
   },
   "scripts": {
     "test": "node --test",
-    "check": "node --check api/health.js && node --check api/pix/list.js && node --check api/pix/sync.js && node --check api/pix/webhook.js && node --check api/pix/ingest.js"
+    "check": "node --check api/health.js && node --check api/pix/list.js && node --check api/pix/sync.js && node --check api/pix/webhook.js && node --check api/pix/ingest.js && node --check utils/account-report.js && node --check utils/mercado-pago.js && node --check utils/pix-store.js"
   },
   "dependencies": {
     "firebase-admin": "^13.5.0"

@@ -16,6 +16,7 @@ pix-esteira/
 │       ├── sync.js
 │       └── webhook.js
 ├── utils/
+│   ├── account-report.js
 │   ├── firebase.js
 │   ├── http.js
 │   ├── mercado-pago.js
@@ -146,6 +147,15 @@ curl -X POST "https://pix-esteira.vercel.app/api/pix/sync?minutes=120" \
   -H "X-Sync-Token: SEU_CRON_SECRET"
 ```
 
+Na primeira execução, o endpoint também configura e solicita o relatório
+oficial **Dinheiro em conta** do Mercado Pago. A criação é assíncrona:
+
+1. a primeira chamada responde com `reportRequested: true`;
+2. enquanto o arquivo não estiver pronto, responde com `reportPending: true`;
+3. quando estiver pronto, o CSV é baixado, filtrado e salvo no Firestore.
+
+Somente relatórios solicitados por este backend são importados.
+
 ## Endpoints
 
 | Endpoint | Proteção | Função |
@@ -161,6 +171,7 @@ curl -X POST "https://pix-esteira.vercel.app/api/pix/sync?minutes=120" \
 As coleções são criadas automaticamente:
 
 - `pix_receipts`: recebimentos;
+- `pix_report_jobs`: relatórios solicitados e seu processamento;
 - `pix_system`: estado da última conferência.
 
 O ID do pagamento é usado como ID do documento, impedindo que notificações

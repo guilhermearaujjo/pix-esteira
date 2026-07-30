@@ -6,22 +6,41 @@ function getAccessToken() {
   return token;
 }
 
-async function mercadoPagoGet(path) {
+async function mercadoPagoRequest(
+  path,
+  { method = "GET", body, responseType = "json" } = {}
+) {
   const response = await fetch(`${API_BASE}${path}`, {
+    method,
     headers: {
       Authorization: `Bearer ${getAccessToken()}`,
-      Accept: "application/json"
-    }
+      Accept: responseType === "text" ? "text/csv, text/plain, */*" : "application/json",
+      ...(body ? { "Content-Type": "application/json" } : {})
+    },
+    ...(body ? { body: JSON.stringify(body) } : {})
   });
 
+  const raw = await response.text();
   if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(
-      `Mercado Pago respondeu ${response.status}: ${detail.slice(0, 180)}`
+    const error = new Error(
+      `Mercado Pago respondeu ${response.status}: ${raw.slice(0, 300)}`
     );
+    error.status = response.status;
+    throw error;
   }
 
-  return response.json();
+  if (responseType === "text") return raw;
+  if (!raw.trim()) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error("Mercado Pago respondeu um JSON inválido.");
+  }
+}
+
+async function mercadoPagoGet(path) {
+  return mercadoPagoRequest(path);
 }
 
 async function getPayment(paymentId) {
@@ -87,8 +106,59 @@ async function searchPayments({ minutes = 120, maxPages = 3 } = {}) {
   return payments;
 }
 
+async function getAccountReportConfig() {
+  try {
+    return await mercadoPagoGet("/v1/account/settlement_report/config");
+  } catch (error) {
+    if (error.status === 404) return null;
+    throw error;
+  }
+}
+
+async function createAccountReportConfig(config) {
+  return mercadoPagoRequest("/v1/account/settlement_report/config", {
+    method: "POST",
+    body: config
+  });
+}
+
+async function updateAccountReportConfig(config) {
+  return mercadoPagoRequest("/v1/account/settlement_report/config", {
+    method: "PUT",
+    body: config
+  });
+}
+
+async function requestAccountReport({ beginDate, endDate }) {
+  return mercadoPagoRequest("/v1/account/settlement_report", {
+    method: "POST",
+    body: {
+      begin_date: beginDate,
+      end_date: endDate
+    }
+  });
+}
+
+async function listAccountReports() {
+  const result = await mercadoPagoGet("/v1/account/settlement_report/list");
+  return Array.isArray(result) ? result : [];
+}
+
+async function downloadAccountReport(fileName) {
+  return mercadoPagoRequest(
+    `/v1/account/settlement_report/${encodeURIComponent(fileName)}`,
+    { responseType: "text" }
+  );
+}
+
 module.exports = {
+  createAccountReportConfig,
+  downloadAccountReport,
+  getAccountReportConfig,
   getPayment,
   getPaymentsFromOrder,
+  listAccountReports,
+  requestAccountReport,
+  updateAccountReportConfig,
   searchPayments
 };

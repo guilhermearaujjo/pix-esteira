@@ -78,9 +78,106 @@ async function getLastSync() {
   return snapshot.exists ? snapshot.data().lastSyncAt || null : null;
 }
 
+async function saveReportJob(report, period) {
+  const id = String(report && report.id ? report.id : "").trim();
+  if (!id) throw new Error("Mercado Pago não devolveu o ID do relatório.");
+
+  const now = new Date();
+  const db = getDb();
+  const batch = db.batch();
+  const jobRef = db.collection("pix_report_jobs").doc(id);
+  const stateRef = db.collection("pix_system").doc("account_report");
+
+  batch.set(
+    jobRef,
+    {
+      id,
+      status: "pending",
+      fileName: report.file_name || null,
+      providerStatus: report.status || "pending",
+      beginDate: period.beginDate,
+      endDate: period.endDate,
+      requestedAt: now.toISOString(),
+      requestedAtMs: now.getTime(),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    },
+    { merge: true }
+  );
+  batch.set(
+    stateRef,
+    {
+      lastJobId: id,
+      lastRequestedAt: now.toISOString(),
+      lastRequestedAtMs: now.getTime(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    },
+    { merge: true }
+  );
+  await batch.commit();
+
+  return id;
+}
+
+async function getReportState() {
+  const snapshot = await getDb()
+    .collection("pix_system")
+    .doc("account_report")
+    .get();
+
+  return snapshot.exists ? snapshot.data() : {};
+}
+
+async function markReportConfigured(details = {}) {
+  await getDb()
+    .collection("pix_system")
+    .doc("account_report")
+    .set(
+      {
+        ...details,
+        configuredAt: new Date().toISOString(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+}
+
+async function listPendingReportJobs(limit = 20) {
+  const snapshot = await getDb()
+    .collection("pix_report_jobs")
+    .where("status", "==", "pending")
+    .limit(Math.min(Math.max(limit, 1), 50))
+    .get();
+
+  return snapshot.docs.map((doc) => ({
+    id: doc.id,
+    ...doc.data()
+  }));
+}
+
+async function finishReportJob(jobId, details = {}) {
+  await getDb()
+    .collection("pix_report_jobs")
+    .doc(String(jobId))
+    .set(
+      {
+        ...details,
+        status: details.status || "processed",
+        finishedAt: new Date().toISOString(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+}
+
 module.exports = {
+  finishReportJob,
   getLastSync,
+  getReportState,
   listReceipts,
+  listPendingReportJobs,
+  markReportConfigured,
   markSync,
-  saveReceipt
+  saveReceipt,
+  saveReportJob
 };
