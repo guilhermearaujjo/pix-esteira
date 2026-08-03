@@ -209,13 +209,8 @@ async function requestAccountReport({
   const begin = normalizeReportDate(beginDate);
   const end = normalizeReportDate(endDate);
 
-  const query = new URLSearchParams({
-    begin_date: begin,
-    end_date: end
-  });
-
   return mercadoPagoRequest(
-    `/v1/account/settlement_report?${query}`,
+    "/v1/account/settlement_report",
     {
       method: "POST",
       body: {
