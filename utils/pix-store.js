@@ -13,26 +13,38 @@ function publicReceipt(data) {
 
 async function saveReceipt(receipt) {
   const db = getDb();
-  const ref = db.collection("pix_receipts").doc(receipt.id);
+  const ref = db
+    .collection("pix_receipts")
+    .doc(receipt.id);
+
   let created = false;
 
   await db.runTransaction(async (transaction) => {
     const snapshot = await transaction.get(ref);
+
     if (snapshot.exists) return;
 
     created = true;
+
     transaction.create(ref, {
       ...receipt,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt:
+        admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt:
+        admin.firestore.FieldValue.serverTimestamp()
     });
   });
 
   return created;
 }
 
-async function listReceipts({ fromMs, toMs, limit = 300 }) {
+async function listReceipts({
+  fromMs,
+  toMs,
+  limit = 300
+}) {
   const db = getDb();
+
   const snapshot = await db
     .collection("pix_receipts")
     .where("approvedAtMs", ">=", fromMs)
@@ -47,14 +59,21 @@ async function listReceipts({ fromMs, toMs, limit = 300 }) {
   }));
 
   return {
-    receipts: all.slice(0, 300).map(publicReceipt),
+    receipts: all
+      .slice(0, 300)
+      .map(publicReceipt),
+
     summary: {
       count: all.length,
+
       totalCents: all.reduce(
-        (total, receipt) => total + Number(receipt.amountCents || 0),
+        (total, receipt) =>
+          total + Number(receipt.amountCents || 0),
         0
       ),
-      lastReceivedAt: all[0] ? all[0].approvedAt : null
+
+      lastReceivedAt:
+        all[0] ? all[0].approvedAt : null
     }
   };
 }
@@ -62,31 +81,55 @@ async function listReceipts({ fromMs, toMs, limit = 300 }) {
 async function markSync(details = {}) {
   const db = getDb();
   const now = new Date();
-  await db.collection("pix_system").doc("sync").set(
-    {
-      ...details,
-      lastSyncAt: now.toISOString(),
-      lastSyncAtMs: now.getTime(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    },
-    { merge: true }
-  );
+
+  await db
+    .collection("pix_system")
+    .doc("sync")
+    .set(
+      {
+        ...details,
+        lastSyncAt: now.toISOString(),
+        lastSyncAtMs: now.getTime(),
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
 }
 
 async function getLastSync() {
-  const snapshot = await getDb().collection("pix_system").doc("sync").get();
-  return snapshot.exists ? snapshot.data().lastSyncAt || null : null;
+  const snapshot = await getDb()
+    .collection("pix_system")
+    .doc("sync")
+    .get();
+
+  return snapshot.exists
+    ? snapshot.data().lastSyncAt || null
+    : null;
 }
 
 async function saveReportJob(report, period) {
-  const id = String(report && report.id ? report.id : "").trim();
-  if (!id) throw new Error("Mercado Pago não devolveu o ID do relatório.");
+  const id = String(
+    report && report.id ? report.id : ""
+  ).trim();
+
+  if (!id) {
+    throw new Error(
+      "Mercado Pago não devolveu o ID do relatório."
+    );
+  }
 
   const now = new Date();
   const db = getDb();
   const batch = db.batch();
-  const jobRef = db.collection("pix_report_jobs").doc(id);
-  const stateRef = db.collection("pix_system").doc("account_report");
+
+  const jobRef = db
+    .collection("pix_report_jobs")
+    .doc(id);
+
+  const stateRef = db
+    .collection("pix_system")
+    .doc("account_report");
 
   batch.set(
     jobRef,
@@ -99,21 +142,26 @@ async function saveReportJob(report, period) {
       endDate: period.endDate,
       requestedAt: now.toISOString(),
       requestedAtMs: now.getTime(),
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt:
+        admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt:
+        admin.firestore.FieldValue.serverTimestamp()
     },
     { merge: true }
   );
+
   batch.set(
     stateRef,
     {
       lastJobId: id,
       lastRequestedAt: now.toISOString(),
       lastRequestedAtMs: now.getTime(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      updatedAt:
+        admin.firestore.FieldValue.serverTimestamp()
     },
     { merge: true }
   );
+
   await batch.commit();
 
   return id;
@@ -125,7 +173,9 @@ async function getReportState() {
     .doc("account_report")
     .get();
 
-  return snapshot.exists ? snapshot.data() : {};
+  return snapshot.exists
+    ? snapshot.data()
+    : {};
 }
 
 async function markReportConfigured(details = {}) {
@@ -136,35 +186,116 @@ async function markReportConfigured(details = {}) {
       {
         ...details,
         configuredAt: new Date().toISOString(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp()
       },
       { merge: true }
     );
 }
 
+/*
+ * Retorna tanto os relatórios pendentes atuais
+ * quanto os que foram marcados incorretamente como
+ * expirados pelas versões anteriores.
+ */
 async function listPendingReportJobs(limit = 20) {
-  const snapshot = await getDb()
-    .collection("pix_report_jobs")
-    .where("status", "==", "pending")
-    .limit(Math.min(Math.max(limit, 1), 50))
-    .get();
+  const safeLimit = Math.min(
+    Math.max(limit, 1),
+    50
+  );
 
-  return snapshot.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data()
-  }));
+  const collection = getDb()
+    .collection("pix_report_jobs");
+
+  const [
+    pendingSnapshot,
+    expiredSnapshot
+  ] = await Promise.all([
+    collection
+      .where("status", "==", "pending")
+      .limit(safeLimit)
+      .get(),
+
+    collection
+      .where("status", "==", "expired")
+      .limit(safeLimit)
+      .get()
+  ]);
+
+  const jobsById = new Map();
+
+  for (
+    const snapshot of [
+      pendingSnapshot,
+      expiredSnapshot
+    ]
+  ) {
+    for (const doc of snapshot.docs) {
+      jobsById.set(doc.id, {
+        id: doc.id,
+        ...doc.data()
+      });
+    }
+  }
+
+  return [...jobsById.values()]
+    .sort(
+      (a, b) =>
+        Number(a.requestedAtMs || 0) -
+        Number(b.requestedAtMs || 0)
+    )
+    .slice(0, safeLimit);
 }
 
-async function finishReportJob(jobId, details = {}) {
+/*
+ * Recupera relatórios que foram marcados
+ * incorretamente como expirados.
+ *
+ * O documento não é excluído.
+ */
+async function reopenReportJob(
+  jobId,
+  details = {}
+) {
   await getDb()
     .collection("pix_report_jobs")
     .doc(String(jobId))
     .set(
       {
         ...details,
-        status: details.status || "processed",
+        status: "pending",
+        recoveredAt: new Date().toISOString(),
+
+        /*
+         * Remove somente a antiga marca de finalização.
+         * A data anterior é preservada pelo sync.js no campo
+         * recoveredFromExpiredAt.
+         */
+        finishedAt:
+          admin.firestore.FieldValue.delete(),
+
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+}
+
+async function finishReportJob(
+  jobId,
+  details = {}
+) {
+  await getDb()
+    .collection("pix_report_jobs")
+    .doc(String(jobId))
+    .set(
+      {
+        ...details,
+        status:
+          details.status || "processed",
         finishedAt: new Date().toISOString(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp()
       },
       { merge: true }
     );
@@ -178,6 +309,7 @@ module.exports = {
   listPendingReportJobs,
   markReportConfigured,
   markSync,
+  reopenReportJob,
   saveReceipt,
   saveReportJob
 };
