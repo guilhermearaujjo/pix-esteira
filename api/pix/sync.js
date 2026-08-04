@@ -1,47 +1,67 @@
-const { applyCors, safeEqual } = require("../../utils/http");
+const {
+  applyCors,
+  safeEqual
+} = require("../../utils/http");
+
 const {
   createAccountReportConfig,
   downloadAccountReport,
   getAccountReportConfig,
   getAccountReportTask,
   requestAccountReport,
+  searchAccountReports,
   searchPayments,
   updateAccountReportConfig
 } = require("../../utils/mercado-pago");
-const { normalizePayment } = require("../../utils/normalize");
+
+const {
+  normalizePayment
+} = require("../../utils/normalize");
+
 const {
   configNeedsUpdate,
   parseAccountReport,
   reportConfig
 } = require("../../utils/account-report");
+
 const {
   finishReportJob,
   getReportState,
   listPendingReportJobs,
   markReportChecked,
   markReportConfigured,
+  markReportFileImported,
+  markReportRequestBlocked,
   markSync,
   reopenReportJob,
+  reportFileAlreadyImported,
   saveReceipt,
   saveReportJob
 } = require("../../utils/pix-store");
 
-const REPORT_RETRY_AFTER_MS = 60_000;
+const REPORT_RETRY_AFTER_MS =
+  65 * 60_000;
+
+const REPORT_QUOTA_COOLDOWN_MS =
+  12 * 60 * 60_000;
 
 function authorized(req) {
   const authorization = String(
     req.headers.authorization || ""
   );
 
-  const bearer = authorization.startsWith("Bearer ")
-    ? authorization.slice(7)
-    : "";
+  const bearer =
+    authorization.startsWith("Bearer ")
+      ? authorization.slice(7)
+      : "";
 
   const headerToken = String(
     req.headers["x-sync-token"] || ""
   );
 
-  const expected = String(process.env.CRON_SECRET || "");
+  const expected = String(
+    process.env.CRON_SECRET || ""
+  );
 
   return (
     Boolean(expected) &&
@@ -53,14 +73,18 @@ function authorized(req) {
 }
 
 async function ensureReportConfiguration() {
-  const existing = await getAccountReportConfig();
+  const existing =
+    await getAccountReportConfig();
 
   if (!existing) {
-    const created = await createAccountReportConfig(
-      reportConfig()
-    );
+    const created =
+      await createAccountReportConfig(
+        reportConfig()
+      );
 
-    await markReportConfigured({ action: "created" });
+    await markReportConfigured({
+      action: "created"
+    });
 
     return {
       action: "created",
@@ -69,11 +93,14 @@ async function ensureReportConfiguration() {
   }
 
   if (configNeedsUpdate(existing)) {
-    const updated = await updateAccountReportConfig(
-      reportConfig(existing)
-    );
+    const updated =
+      await updateAccountReportConfig(
+        reportConfig(existing)
+      );
 
-    await markReportConfigured({ action: "updated" });
+    await markReportConfigured({
+      action: "updated"
+    });
 
     return {
       action: "updated",
@@ -89,6 +116,7 @@ async function ensureReportConfiguration() {
 
 function reportPeriod() {
   const end = new Date();
+
   const begin = new Date(
     end.getTime() - 72 * 60 * 60_000
   );
@@ -132,7 +160,9 @@ async function processReadyReports(pendingJobs) {
     let report;
 
     try {
-      report = await getAccountReportTask(job.id);
+      report = await getAccountReportTask(
+        job.id
+      );
     } catch (error) {
       if (error.status !== 404) {
         throw error;
@@ -143,7 +173,8 @@ async function processReadyReports(pendingJobs) {
       await finishReportJob(job.id, {
         status: "failed",
         providerStatus: "task_not_found",
-        providerError: error.message || String(error)
+        providerError:
+          error.message || String(error)
       });
 
       continue;
@@ -165,9 +196,48 @@ async function processReadyReports(pendingJobs) {
       "";
 
     if (fileName) {
-      const csv = await downloadAccountReport(fileName);
-      const receipts = parseAccountReport(csv);
-      const created = await importReceipts(receipts);
+      const reportFile = {
+        id: reportId || job.id,
+        file_name: fileName,
+        status: providerStatus,
+        begin_date:
+          (report && report.begin_date) ||
+          job.beginDate ||
+          null,
+        end_date:
+          (report && report.end_date) ||
+          job.endDate ||
+          null
+      };
+
+      if (
+        await reportFileAlreadyImported(
+          reportFile
+        )
+      ) {
+        processed += 1;
+
+        await finishReportJob(job.id, {
+          status: "processed",
+          fileName,
+          providerStatus,
+          reportId,
+          alreadyImported: true
+        });
+
+        continue;
+      }
+
+      const csv =
+        await downloadAccountReport(
+          fileName
+        );
+
+      const receipts =
+        parseAccountReport(csv);
+
+      const created =
+        await importReceipts(receipts);
 
       imported += created;
       pixFound += receipts.length;
@@ -182,13 +252,21 @@ async function processReadyReports(pendingJobs) {
         imported: created
       });
 
+      await markReportFileImported(
+        reportFile,
+        {
+          rowsAccepted: receipts.length,
+          imported: created,
+          sourceTaskId: String(job.id)
+        }
+      );
+
       continue;
     }
 
     if (
-      /^(failed|error|cancelled|canceled)$/i.test(
-        providerStatus
-      )
+      /^(failed|error|cancelled|canceled)$/i
+        .test(providerStatus)
     ) {
       failed += 1;
 
@@ -205,7 +283,8 @@ async function processReadyReports(pendingJobs) {
       await reopenReportJob(job.id, {
         providerStatus,
         reportId,
-        recoveredFromExpiredAt: job.finishedAt || null
+        recoveredFromExpiredAt:
+          job.finishedAt || null
       });
     } else {
       await markReportChecked(job.id, {
@@ -224,6 +303,77 @@ async function processReadyReports(pendingJobs) {
     failed,
     stillPending
   };
+}
+
+async function importLatestAvailableReport() {
+  const reports =
+    await searchAccountReports({
+      createdWithinDays: 7,
+      limit: 30
+    });
+
+  for (const report of reports) {
+    const fileName = String(
+      (report && report.file_name) || ""
+    ).trim();
+
+    const providerStatus = String(
+      (report && report.status) || ""
+    );
+
+    if (
+      !fileName ||
+      providerStatus.toLowerCase() !==
+        "processed"
+    ) {
+      continue;
+    }
+
+    if (
+      await reportFileAlreadyImported(report)
+    ) {
+      continue;
+    }
+
+    const csv =
+      await downloadAccountReport(fileName);
+
+    const receipts =
+      parseAccountReport(csv);
+
+    const imported =
+      await importReceipts(receipts);
+
+    await markReportFileImported(
+      report,
+      {
+        rowsAccepted: receipts.length,
+        imported,
+        source: "report_search"
+      }
+    );
+
+    return {
+      imported,
+      pixFound: receipts.length,
+      processed: 1
+    };
+  }
+
+  return {
+    imported: 0,
+    pixFound: 0,
+    processed: 0
+  };
+}
+
+function reportQuotaReached(error) {
+  return (
+    error &&
+    error.status === 400 &&
+    /max number of pending task achieved|more than 24 task/i
+      .test(error.message || "")
+  );
 }
 
 async function requestReportIfNeeded(
@@ -245,6 +395,24 @@ async function requestReportIfNeeded(
   }
 
   const state = await getReportState();
+
+  const nextReportRequestAtMs = Number(
+    state.nextReportRequestAtMs || 0
+  );
+
+  if (
+    nextReportRequestAtMs > Date.now()
+  ) {
+    return {
+      requested: false,
+      pending: 0,
+      limited: true,
+      retryAt: new Date(
+        nextReportRequestAtMs
+      ).toISOString()
+    };
+  }
+
   const lastRequestedAtMs = Number(
     state.lastRequestedAtMs || 0
   );
@@ -261,25 +429,61 @@ async function requestReportIfNeeded(
   }
 
   const period = reportPeriod();
-  const report = await requestAccountReport(period);
+  let report;
+
+  try {
+    report =
+      await requestAccountReport(period);
+  } catch (error) {
+    if (!reportQuotaReached(error)) {
+      throw error;
+    }
+
+    const retryAtMs =
+      Date.now() +
+      REPORT_QUOTA_COOLDOWN_MS;
+
+    await markReportRequestBlocked({
+      nextReportRequestAtMs: retryAtMs,
+      nextReportRequestAt:
+        new Date(retryAtMs).toISOString(),
+      providerError:
+        error.message || String(error)
+    });
+
+    return {
+      requested: false,
+      pending: 0,
+      limited: true,
+      retryAt:
+        new Date(retryAtMs).toISOString()
+    };
+  }
 
   await saveReportJob(report, period);
 
   return {
     requested: true,
     pending: 1,
+    limited: false,
     reportId: String(report.id)
   };
 }
 
 module.exports = async (req, res) => {
-  applyCors(req, res, ["GET", "POST", "OPTIONS"]);
+  applyCors(
+    req,
+    res,
+    ["GET", "POST", "OPTIONS"]
+  );
 
   if (req.method === "OPTIONS") {
     return res.status(204).end();
   }
 
-  if (!["GET", "POST"].includes(req.method)) {
+  if (
+    !["GET", "POST"].includes(req.method)
+  ) {
     res.setHeader("Allow", "GET, POST");
 
     return res.status(405).json({
@@ -312,13 +516,15 @@ module.exports = async (req, res) => {
       10080
     );
 
-    const payments = await searchPayments({ minutes });
+    const payments =
+      await searchPayments({ minutes });
 
     let pixApproved = 0;
     let imported = 0;
 
     for (const payment of payments) {
-      const receipt = normalizePayment(payment);
+      const receipt =
+        normalizePayment(payment);
 
       if (!receipt) {
         continue;
@@ -338,14 +544,30 @@ module.exports = async (req, res) => {
       await listPendingReportJobs();
 
     const reportImport =
-      await processReadyReports(pendingJobs);
+      await processReadyReports(
+        pendingJobs
+      );
 
     imported += reportImport.imported;
+
+    const availableReportImport =
+      await importLatestAvailableReport();
+
+    imported +=
+      availableReportImport.imported;
+
+    const reportsProcessed =
+      reportImport.processed +
+      availableReportImport.processed;
+
+    const reportPixFound =
+      reportImport.pixFound +
+      availableReportImport.pixFound;
 
     const reportRequest =
       await requestReportIfNeeded(
         reportImport.stillPending,
-        reportImport.processed
+        reportsProcessed
       );
 
     const reportPending =
@@ -357,11 +579,17 @@ module.exports = async (req, res) => {
       pixApproved,
       imported,
       minutes,
-      reportConfig: reportConfiguration.action,
-      reportPixFound: reportImport.pixFound,
-      reportsProcessed: reportImport.processed,
-      reportsFailed: reportImport.failed,
-      reportPending
+      reportConfig:
+        reportConfiguration.action,
+      reportPixFound,
+      reportsProcessed,
+      reportsFailed:
+        reportImport.failed,
+      reportPending,
+      reportLimited:
+        Boolean(reportRequest.limited),
+      reportRetryAt:
+        reportRequest.retryAt || null
     });
 
     return res.status(200).json({
@@ -370,12 +598,19 @@ module.exports = async (req, res) => {
       pixApproved,
       imported,
       minutes,
-      reportConfig: reportConfiguration.action,
-      reportPixFound: reportImport.pixFound,
-      reportsProcessed: reportImport.processed,
-      reportsFailed: reportImport.failed,
-      reportRequested: reportRequest.requested,
-      reportPending
+      reportConfig:
+        reportConfiguration.action,
+      reportPixFound,
+      reportsProcessed,
+      reportsFailed:
+        reportImport.failed,
+      reportRequested:
+        reportRequest.requested,
+      reportPending,
+      reportLimited:
+        Boolean(reportRequest.limited),
+      reportRetryAt:
+        reportRequest.retryAt || null
     });
   } catch (error) {
     console.error("[pix/sync]", error);
@@ -384,7 +619,8 @@ module.exports = async (req, res) => {
       ok: false,
       error:
         "Erro ao conferir pagamentos no Mercado Pago.",
-      detail: error.message || String(error)
+      detail:
+        error.message || String(error)
     });
   }
 };
