@@ -156,65 +156,93 @@ async function processReadyReports(pendingJobs) {
   let failed = 0;
   let stillPending = 0;
 
-  for (const job of pendingJobs) {
-    let report;
+  // Limite de jobs verificados por execução: evita estourar o
+  // maxDuration (30s) do Vercel quando a fila de jobs acumula.
+  // Os jobs não vistos nesta rodada continuam pendentes e serão
+  // conferidos na próxima sincronização.
+  const REPORT_JOBS_PER_RUN = 6;
+  const jobsToCheck = pendingJobs.slice(
+    0,
+    REPORT_JOBS_PER_RUN
+  );
+  const skippedJobs =
+    pendingJobs.length - jobsToCheck.length;
 
+  for (const job of jobsToCheck) {
+    // Cada job agora tem seu próprio try/catch "à prova de tudo":
+    // um erro (de rede, do Mercado Pago, de parsing do CSV etc.)
+    // em UM job nunca mais derruba a sincronização inteira. Antes,
+    // apenas erro 404 era tolerado — qualquer outro erro (400 de
+    // tarefa expirada, 429, timeout...) fazia o /api/pix/sync
+    // inteiro falhar com 500, mesmo que os outros jobs estivessem
+    // OK. Isso explica o botão "Sincronizar" falhando sempre que
+    // havia um job problemático na fila.
     try {
-      report = await getAccountReportTask(
+      const report = await getAccountReportTask(
         job.id
       );
-    } catch (error) {
-      if (error.status !== 404) {
-        throw error;
-      }
 
-      failed += 1;
+      const providerStatus = String(
+        (report && report.status) || "pending"
+      );
 
-      await finishReportJob(job.id, {
-        status: "failed",
-        providerStatus: "task_not_found",
-        providerError:
-          error.message || String(error)
-      });
+      const reportId =
+        report && report.report_id
+          ? String(report.report_id)
+          : null;
 
-      continue;
-    }
+      const fileName =
+        (report && report.file_name) ||
+        job.fileName ||
+        job.file_name ||
+        "";
 
-    const providerStatus = String(
-      (report && report.status) || "pending"
-    );
+      if (fileName) {
+        const reportFile = {
+          id: reportId || job.id,
+          file_name: fileName,
+          status: providerStatus,
+          begin_date:
+            (report && report.begin_date) ||
+            job.beginDate ||
+            null,
+          end_date:
+            (report && report.end_date) ||
+            job.endDate ||
+            null
+        };
 
-    const reportId =
-      report && report.report_id
-        ? String(report.report_id)
-        : null;
+        if (
+          await reportFileAlreadyImported(
+            reportFile
+          )
+        ) {
+          processed += 1;
 
-    const fileName =
-      (report && report.file_name) ||
-      job.fileName ||
-      job.file_name ||
-      "";
+          await finishReportJob(job.id, {
+            status: "processed",
+            fileName,
+            providerStatus,
+            reportId,
+            alreadyImported: true
+          });
 
-    if (fileName) {
-      const reportFile = {
-        id: reportId || job.id,
-        file_name: fileName,
-        status: providerStatus,
-        begin_date:
-          (report && report.begin_date) ||
-          job.beginDate ||
-          null,
-        end_date:
-          (report && report.end_date) ||
-          job.endDate ||
-          null
-      };
+          continue;
+        }
 
-      if (
-        await reportFileAlreadyImported(
-          reportFile
-        )
-      ) {
+        const csv =
+          await downloadAccountReport(
+            fileName
+          );
+
+        const receipts =
+          parseAccountReport(csv);
+
+        const created =
+          await importReceipts(receipts);
+
+        imported += created;
+        pixFound += receipts.length;
         processed += 1;
 
         await finishReportJob(job.id, {
@@ -222,78 +250,81 @@ async function processReadyReports(pendingJobs) {
           fileName,
           providerStatus,
           reportId,
-          alreadyImported: true
+          rowsAccepted: receipts.length,
+          imported: created
+        });
+
+        await markReportFileImported(
+          reportFile,
+          {
+            rowsAccepted: receipts.length,
+            imported: created,
+            sourceTaskId: String(job.id)
+          }
+        );
+
+        continue;
+      }
+
+      if (
+        /^(failed|error|cancelled|canceled)$/i
+          .test(providerStatus)
+      ) {
+        failed += 1;
+
+        await finishReportJob(job.id, {
+          status: "failed",
+          providerStatus,
+          reportId
         });
 
         continue;
       }
 
-      const csv =
-        await downloadAccountReport(
-          fileName
-        );
+      if (job.status === "expired") {
+        await reopenReportJob(job.id, {
+          providerStatus,
+          reportId,
+          recoveredFromExpiredAt:
+            job.finishedAt || null
+        });
+      } else {
+        await markReportChecked(job.id, {
+          providerStatus,
+          reportId
+        });
+      }
 
-      const receipts =
-        parseAccountReport(csv);
-
-      const created =
-        await importReceipts(receipts);
-
-      imported += created;
-      pixFound += receipts.length;
-      processed += 1;
-
-      await finishReportJob(job.id, {
-        status: "processed",
-        fileName,
-        providerStatus,
-        reportId,
-        rowsAccepted: receipts.length,
-        imported: created
-      });
-
-      await markReportFileImported(
-        reportFile,
-        {
-          rowsAccepted: receipts.length,
-          imported: created,
-          sourceTaskId: String(job.id)
-        }
-      );
-
-      continue;
-    }
-
-    if (
-      /^(failed|error|cancelled|canceled)$/i
-        .test(providerStatus)
-    ) {
+      stillPending += 1;
+    } catch (error) {
+      // Job com problema (tarefa expirada de vez, erro do MP,
+      // rede etc.): marca como falho e SEGUE para o próximo job
+      // em vez de derrubar toda a sincronização.
       failed += 1;
+
+      const status =
+        error && error.status === 404
+          ? "task_not_found"
+          : "check_error";
 
       await finishReportJob(job.id, {
         status: "failed",
-        providerStatus,
-        reportId
-      });
-
-      continue;
-    }
-
-    if (job.status === "expired") {
-      await reopenReportJob(job.id, {
-        providerStatus,
-        reportId,
-        recoveredFromExpiredAt:
-          job.finishedAt || null
-      });
-    } else {
-      await markReportChecked(job.id, {
-        providerStatus,
-        reportId
+        providerStatus: status,
+        providerError:
+          (error && error.message) ||
+          String(error)
+      }).catch((persistError) => {
+        console.error(
+          "[pix/sync] falha ao marcar job com erro",
+          job.id,
+          persistError
+        );
       });
     }
+  }
 
-    stillPending += 1;
+  if (skippedJobs > 0) {
+    stillPending += skippedJobs;
   }
 
   return {
