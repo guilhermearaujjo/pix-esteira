@@ -3,7 +3,7 @@ const {
   createAccountReportConfig,
   downloadAccountReport,
   getAccountReportConfig,
-  listAccountReports,
+  getAccountReportTask,
   requestAccountReport,
   searchPayments,
   updateAccountReportConfig
@@ -18,6 +18,7 @@ const {
   finishReportJob,
   getReportState,
   listPendingReportJobs,
+  markReportChecked,
   markReportConfigured,
   markSync,
   reopenReportJob,
@@ -28,16 +29,26 @@ const {
 const REPORT_RETRY_AFTER_MS = 60_000;
 
 function authorized(req) {
-  const authorization = String(req.headers.authorization || "");
+  const authorization = String(
+    req.headers.authorization || ""
+  );
+
   const bearer = authorization.startsWith("Bearer ")
     ? authorization.slice(7)
     : "";
-  const headerToken = String(req.headers["x-sync-token"] || "");
+
+  const headerToken = String(
+    req.headers["x-sync-token"] || ""
+  );
+
   const expected = String(process.env.CRON_SECRET || "");
 
   return (
     Boolean(expected) &&
-    (safeEqual(bearer, expected) || safeEqual(headerToken, expected))
+    (
+      safeEqual(bearer, expected) ||
+      safeEqual(headerToken, expected)
+    )
   );
 }
 
@@ -45,23 +56,42 @@ async function ensureReportConfiguration() {
   const existing = await getAccountReportConfig();
 
   if (!existing) {
-    const created = await createAccountReportConfig(reportConfig());
+    const created = await createAccountReportConfig(
+      reportConfig()
+    );
+
     await markReportConfigured({ action: "created" });
-    return { action: "created", config: created };
+
+    return {
+      action: "created",
+      config: created
+    };
   }
 
   if (configNeedsUpdate(existing)) {
-    const updated = await updateAccountReportConfig(reportConfig(existing));
+    const updated = await updateAccountReportConfig(
+      reportConfig(existing)
+    );
+
     await markReportConfigured({ action: "updated" });
-    return { action: "updated", config: updated };
+
+    return {
+      action: "updated",
+      config: updated
+    };
   }
 
-  return { action: "unchanged", config: existing };
+  return {
+    action: "unchanged",
+    config: existing
+  };
 }
 
 function reportPeriod() {
   const end = new Date();
-  const begin = new Date(end.getTime() - 72 * 60 * 60_000);
+  const begin = new Date(
+    end.getTime() - 72 * 60 * 60_000
+  );
 
   return {
     beginDate: begin.toISOString(),
@@ -73,7 +103,9 @@ async function importReceipts(receipts) {
   let imported = 0;
 
   for (const receipt of receipts) {
-    if (await saveReceipt(receipt)) imported += 1;
+    if (await saveReceipt(receipt)) {
+      imported += 1;
+    }
   }
 
   return imported;
@@ -85,25 +117,46 @@ async function processReadyReports(pendingJobs) {
       imported: 0,
       pixFound: 0,
       processed: 0,
+      failed: 0,
       stillPending: 0
     };
   }
 
-  const availableReports = await listAccountReports();
-  const reportsById = new Map(
-    availableReports.map((report) => [
-      String(report.id || ""),
-      report
-    ])
-  );
-
   let imported = 0;
   let pixFound = 0;
   let processed = 0;
+  let failed = 0;
   let stillPending = 0;
 
   for (const job of pendingJobs) {
-    const report = reportsById.get(String(job.id));
+    let report;
+
+    try {
+      report = await getAccountReportTask(job.id);
+    } catch (error) {
+      if (error.status !== 404) {
+        throw error;
+      }
+
+      failed += 1;
+
+      await finishReportJob(job.id, {
+        status: "failed",
+        providerStatus: "task_not_found",
+        providerError: error.message || String(error)
+      });
+
+      continue;
+    }
+
+    const providerStatus = String(
+      (report && report.status) || "pending"
+    );
+
+    const reportId =
+      report && report.report_id
+        ? String(report.report_id)
+        : null;
 
     const fileName =
       (report && report.file_name) ||
@@ -123,6 +176,8 @@ async function processReadyReports(pendingJobs) {
       await finishReportJob(job.id, {
         status: "processed",
         fileName,
+        providerStatus,
+        reportId,
         rowsAccepted: receipts.length,
         imported: created
       });
@@ -130,21 +185,32 @@ async function processReadyReports(pendingJobs) {
       continue;
     }
 
-    /*
-     * Versões anteriores marcavam o relatório como expirado
-     * depois de 30 minutos.
-     *
-     * Como o Mercado Pago pode levar mais tempo para gerar
-     * o arquivo, recuperamos esses relatórios e continuamos
-     * consultando até o arquivo ficar disponível.
-     */
+    if (
+      /^(failed|error|cancelled|canceled)$/i.test(
+        providerStatus
+      )
+    ) {
+      failed += 1;
+
+      await finishReportJob(job.id, {
+        status: "failed",
+        providerStatus,
+        reportId
+      });
+
+      continue;
+    }
+
     if (job.status === "expired") {
       await reopenReportJob(job.id, {
-        providerStatus:
-          (report && report.status) ||
-          job.providerStatus ||
-          "not_ready",
+        providerStatus,
+        reportId,
         recoveredFromExpiredAt: job.finishedAt || null
+      });
+    } else {
+      await markReportChecked(job.id, {
+        providerStatus,
+        reportId
       });
     }
 
@@ -155,6 +221,7 @@ async function processReadyReports(pendingJobs) {
     imported,
     pixFound,
     processed,
+    failed,
     stillPending
   };
 }
@@ -184,7 +251,8 @@ async function requestReportIfNeeded(
 
   if (
     lastRequestedAtMs > 0 &&
-    Date.now() - lastRequestedAtMs < REPORT_RETRY_AFTER_MS
+    Date.now() - lastRequestedAtMs <
+      REPORT_RETRY_AFTER_MS
   ) {
     return {
       requested: false,
@@ -223,7 +291,8 @@ module.exports = async (req, res) => {
   if (!process.env.CRON_SECRET) {
     return res.status(503).json({
       ok: false,
-      error: "CRON_SECRET ainda não foi configurado no Vercel."
+      error:
+        "CRON_SECRET ainda não foi configurado no Vercel."
     });
   }
 
@@ -236,7 +305,10 @@ module.exports = async (req, res) => {
 
   try {
     const minutes = Math.min(
-      Math.max(Number(req.query.minutes || 120), 5),
+      Math.max(
+        Number(req.query.minutes || 120),
+        5
+      ),
       10080
     );
 
@@ -248,7 +320,9 @@ module.exports = async (req, res) => {
     for (const payment of payments) {
       const receipt = normalizePayment(payment);
 
-      if (!receipt) continue;
+      if (!receipt) {
+        continue;
+      }
 
       pixApproved += 1;
 
@@ -286,6 +360,7 @@ module.exports = async (req, res) => {
       reportConfig: reportConfiguration.action,
       reportPixFound: reportImport.pixFound,
       reportsProcessed: reportImport.processed,
+      reportsFailed: reportImport.failed,
       reportPending
     });
 
@@ -298,6 +373,7 @@ module.exports = async (req, res) => {
       reportConfig: reportConfiguration.action,
       reportPixFound: reportImport.pixFound,
       reportsProcessed: reportImport.processed,
+      reportsFailed: reportImport.failed,
       reportRequested: reportRequest.requested,
       reportPending
     });
@@ -306,7 +382,8 @@ module.exports = async (req, res) => {
 
     return res.status(500).json({
       ok: false,
-      error: "Erro ao conferir pagamentos no Mercado Pago.",
+      error:
+        "Erro ao conferir pagamentos no Mercado Pago.",
       detail: error.message || String(error)
     });
   }
