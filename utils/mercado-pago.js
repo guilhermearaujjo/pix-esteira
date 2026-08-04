@@ -221,12 +221,13 @@ async function requestAccountReport({
   );
 }
 
-async function listAccountReports() {
-  const result = await mercadoPagoGet(
-    "/v1/account/settlement_report/list"
-  );
+async function getAccountReportTask(taskId) {
+  const id = encodeURIComponent(String(taskId));
+  const accessToken = encodeURIComponent(getAccessToken());
 
-  return Array.isArray(result) ? result : [];
+  return mercadoPagoGet(
+    `/v1/account/settlement_report/task/${id}?access_token=${accessToken}`
+  );
 }
 
 async function downloadAccountReport(fileName) {
@@ -242,9 +243,9 @@ module.exports = {
   createAccountReportConfig,
   downloadAccountReport,
   getAccountReportConfig,
+  getAccountReportTask,
   getPayment,
   getPaymentsFromOrder,
-  listAccountReports,
   requestAccountReport,
   updateAccountReportConfig,
   searchPayments
