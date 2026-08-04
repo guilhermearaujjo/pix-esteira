@@ -18,9 +18,13 @@ async function saveReceipt(receipt) {
 
   await db.runTransaction(async (transaction) => {
     const snapshot = await transaction.get(ref);
-    if (snapshot.exists) return;
+
+    if (snapshot.exists) {
+      return;
+    }
 
     created = true;
+
     transaction.create(ref, {
       ...receipt,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -33,6 +37,7 @@ async function saveReceipt(receipt) {
 
 async function listReceipts({ fromMs, toMs, limit = 300 }) {
   const db = getDb();
+
   const snapshot = await db
     .collection("pix_receipts")
     .where("approvedAtMs", ">=", fromMs)
@@ -51,10 +56,13 @@ async function listReceipts({ fromMs, toMs, limit = 300 }) {
     summary: {
       count: all.length,
       totalCents: all.reduce(
-        (total, receipt) => total + Number(receipt.amountCents || 0),
+        (total, receipt) =>
+          total + Number(receipt.amountCents || 0),
         0
       ),
-      lastReceivedAt: all[0] ? all[0].approvedAt : null
+      lastReceivedAt: all[0]
+        ? all[0].approvedAt
+        : null
     }
   };
 }
@@ -86,7 +94,9 @@ async function getLastSync() {
 }
 
 async function saveReportJob(report, period) {
-  const id = String(report && report.id ? report.id : "").trim();
+  const id = String(
+    report && report.id ? report.id : ""
+  ).trim();
 
   if (!id) {
     throw new Error(
@@ -97,7 +107,11 @@ async function saveReportJob(report, period) {
   const now = new Date();
   const db = getDb();
   const batch = db.batch();
-  const jobRef = db.collection("pix_report_jobs").doc(id);
+
+  const jobRef = db
+    .collection("pix_report_jobs")
+    .doc(id);
+
   const stateRef = db
     .collection("pix_system")
     .doc("account_report");
@@ -113,8 +127,10 @@ async function saveReportJob(report, period) {
       endDate: period.endDate,
       requestedAt: now.toISOString(),
       requestedAtMs: now.getTime(),
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt:
+        admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt:
+        admin.firestore.FieldValue.serverTimestamp()
     },
     { merge: true }
   );
@@ -125,7 +141,8 @@ async function saveReportJob(report, period) {
       lastJobId: id,
       lastRequestedAt: now.toISOString(),
       lastRequestedAtMs: now.getTime(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      updatedAt:
+        admin.firestore.FieldValue.serverTimestamp()
     },
     { merge: true }
   );
@@ -144,6 +161,76 @@ async function getReportState() {
   return snapshot.exists ? snapshot.data() : {};
 }
 
+function reportFileDocumentId(report) {
+  const supplied = String(
+    (report && (report.id || report.file_name)) || ""
+  ).trim();
+
+  if (!supplied) {
+    throw new Error(
+      "Relatório sem ID e sem nome de arquivo."
+    );
+  }
+
+  return supplied.replace(/[/.]/g, "_");
+}
+
+async function reportFileAlreadyImported(report) {
+  const snapshot = await getDb()
+    .collection("pix_report_files")
+    .doc(reportFileDocumentId(report))
+    .get();
+
+  return (
+    snapshot.exists &&
+    snapshot.data().status === "imported"
+  );
+}
+
+async function markReportFileImported(
+  report,
+  details = {}
+) {
+  await getDb()
+    .collection("pix_report_files")
+    .doc(reportFileDocumentId(report))
+    .set(
+      {
+        reportId: report.id
+          ? String(report.id)
+          : null,
+        fileName: report.file_name || null,
+        providerStatus:
+          report.status || "processed",
+        beginDate: report.begin_date || null,
+        endDate: report.end_date || null,
+        ...details,
+        status: "imported",
+        importedAt: new Date().toISOString(),
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+}
+
+async function markReportRequestBlocked(
+  details = {}
+) {
+  await getDb()
+    .collection("pix_system")
+    .doc("account_report")
+    .set(
+      {
+        ...details,
+        quotaLimitedAt: new Date().toISOString(),
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+}
+
 async function markReportConfigured(details = {}) {
   await getDb()
     .collection("pix_system")
@@ -152,30 +239,42 @@ async function markReportConfigured(details = {}) {
       {
         ...details,
         configuredAt: new Date().toISOString(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp()
       },
       { merge: true }
     );
 }
 
 async function listPendingReportJobs(limit = 20) {
-  const safeLimit = Math.min(Math.max(limit, 1), 50);
-  const collection = getDb().collection("pix_report_jobs");
+  const safeLimit = Math.min(
+    Math.max(limit, 1),
+    50
+  );
 
-  const [pendingSnapshot, expiredSnapshot] = await Promise.all([
-    collection
-      .where("status", "==", "pending")
-      .limit(safeLimit)
-      .get(),
-    collection
-      .where("status", "==", "expired")
-      .limit(safeLimit)
-      .get()
-  ]);
+  const collection = getDb()
+    .collection("pix_report_jobs");
+
+  const [pendingSnapshot, expiredSnapshot] =
+    await Promise.all([
+      collection
+        .where("status", "==", "pending")
+        .limit(safeLimit)
+        .get(),
+      collection
+        .where("status", "==", "expired")
+        .limit(safeLimit)
+        .get()
+    ]);
 
   const jobsById = new Map();
 
-  for (const snapshot of [pendingSnapshot, expiredSnapshot]) {
+  for (
+    const snapshot of [
+      pendingSnapshot,
+      expiredSnapshot
+    ]
+  ) {
     for (const doc of snapshot.docs) {
       jobsById.set(doc.id, {
         id: doc.id,
@@ -193,7 +292,10 @@ async function listPendingReportJobs(limit = 20) {
     .slice(0, safeLimit);
 }
 
-async function reopenReportJob(jobId, details = {}) {
+async function reopenReportJob(
+  jobId,
+  details = {}
+) {
   await getDb()
     .collection("pix_report_jobs")
     .doc(String(jobId))
@@ -202,14 +304,19 @@ async function reopenReportJob(jobId, details = {}) {
         ...details,
         status: "pending",
         recoveredAt: new Date().toISOString(),
-        finishedAt: admin.firestore.FieldValue.delete(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        finishedAt:
+          admin.firestore.FieldValue.delete(),
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp()
       },
       { merge: true }
     );
 }
 
-async function markReportChecked(jobId, details = {}) {
+async function markReportChecked(
+  jobId,
+  details = {}
+) {
   await getDb()
     .collection("pix_report_jobs")
     .doc(String(jobId))
@@ -217,13 +324,17 @@ async function markReportChecked(jobId, details = {}) {
       {
         ...details,
         lastCheckedAt: new Date().toISOString(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp()
       },
       { merge: true }
     );
 }
 
-async function finishReportJob(jobId, details = {}) {
+async function finishReportJob(
+  jobId,
+  details = {}
+) {
   await getDb()
     .collection("pix_report_jobs")
     .doc(String(jobId))
@@ -232,7 +343,8 @@ async function finishReportJob(jobId, details = {}) {
         ...details,
         status: details.status || "processed",
         finishedAt: new Date().toISOString(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp()
       },
       { merge: true }
     );
@@ -244,10 +356,13 @@ module.exports = {
   getReportState,
   listReceipts,
   listPendingReportJobs,
-  markReportConfigured,
   markReportChecked,
+  markReportConfigured,
+  markReportFileImported,
+  markReportRequestBlocked,
   markSync,
   reopenReportJob,
+  reportFileAlreadyImported,
   saveReceipt,
   saveReportJob
 };
