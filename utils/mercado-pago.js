@@ -230,6 +230,45 @@ async function getAccountReportTask(taskId) {
   );
 }
 
+async function searchAccountReports({
+  createdWithinDays = 7,
+  limit = 30
+} = {}) {
+  const safeDays = Math.min(
+    Math.max(Number(createdWithinDays) || 7, 1),
+    30
+  );
+
+  const safeLimit = Math.min(
+    Math.max(Number(limit) || 30, 1),
+    100
+  );
+
+  const end = new Date();
+  const begin = new Date(
+    end.getTime() - safeDays * 24 * 60 * 60_000
+  );
+
+  const normalize = (value) =>
+    value.toISOString().replace(/\.\d{3}Z$/, "Z");
+
+  const query = new URLSearchParams({
+    range: "date_created",
+    range_begin_date: normalize(begin),
+    range_end_date: normalize(end),
+    limit: String(safeLimit),
+    offset: "0"
+  });
+
+  const result = await mercadoPagoGet(
+    `/v1/account/settlement_report/search?${query}`
+  );
+
+  return result && Array.isArray(result.results)
+    ? result.results
+    : [];
+}
+
 async function downloadAccountReport(fileName) {
   return mercadoPagoRequest(
     `/v1/account/settlement_report/${encodeURIComponent(fileName)}`,
@@ -247,6 +286,7 @@ module.exports = {
   getPayment,
   getPaymentsFromOrder,
   requestAccountReport,
-  updateAccountReportConfig,
-  searchPayments
+  searchAccountReports,
+  searchPayments,
+  updateAccountReportConfig
 };
