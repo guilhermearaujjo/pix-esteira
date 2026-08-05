@@ -343,6 +343,10 @@ async function importLatestAvailableReport() {
       limit: 30
     });
 
+  let imported = 0;
+  let pixFound = 0;
+  let processed = 0;
+
   for (const report of reports) {
     const fileName = String(
       (report && report.file_name) || ""
@@ -366,36 +370,64 @@ async function importLatestAvailableReport() {
       continue;
     }
 
-    const csv =
-      await downloadAccountReport(fileName);
+    // Cada relatório candidato tem seu próprio try/catch: se o
+    // Mercado Pago rejeitar UM arquivo específico (por exemplo,
+    // relatórios gerados manualmente pelo painel do MP às vezes
+    // respondem 400 "Error validating url..." ao serem baixados
+    // por aqui), isso não pode derrubar a sincronização inteira
+    // nem travar o processamento dos relatórios seguintes.
+    try {
+      const csv =
+        await downloadAccountReport(fileName);
 
-    const receipts =
-      parseAccountReport(csv);
+      const receipts =
+        parseAccountReport(csv);
 
-    const imported =
-      await importReceipts(receipts);
+      const created =
+        await importReceipts(receipts);
 
-    await markReportFileImported(
-      report,
-      {
-        rowsAccepted: receipts.length,
-        imported,
-        source: "report_search"
-      }
-    );
+      await markReportFileImported(
+        report,
+        {
+          rowsAccepted: receipts.length,
+          imported: created,
+          source: "report_search"
+        }
+      );
 
-    return {
-      imported,
-      pixFound: receipts.length,
-      processed: 1
-    };
+      imported += created;
+      pixFound += receipts.length;
+      processed += 1;
+    } catch (error) {
+      console.error(
+        "[pix/sync] falha ao baixar/importar relatório",
+        fileName,
+        error
+      );
+
+      // Marca como "resolvido" mesmo tendo falhado, só para
+      // parar de tentar baixar esse mesmo arquivo problemático
+      // a cada sincronização. O detalhe do erro fica registrado
+      // para investigação.
+      await markReportFileImported(report, {
+        rowsAccepted: 0,
+        imported: 0,
+        source: "report_search",
+        downloadFailed: true,
+        providerError:
+          (error && error.message) ||
+          String(error)
+      }).catch((persistError) => {
+        console.error(
+          "[pix/sync] falha ao registrar relatório com erro",
+          fileName,
+          persistError
+        );
+      });
+    }
   }
 
-  return {
-    imported: 0,
-    pixFound: 0,
-    processed: 0
-  };
+  return { imported, pixFound, processed };
 }
 
 function reportQuotaReached(error) {
