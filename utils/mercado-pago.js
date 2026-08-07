@@ -157,7 +157,7 @@ async function searchPayments({
 async function getAccountReportConfig() {
   try {
     return await mercadoPagoGet(
-      "/v1/account/settlement_report/config"
+      "/v1/account/release_report/config"
     );
   } catch (error) {
     const configurationMissing =
@@ -179,7 +179,7 @@ async function getAccountReportConfig() {
 
 async function createAccountReportConfig(config) {
   return mercadoPagoRequest(
-    "/v1/account/settlement_report/config",
+    "/v1/account/release_report/config",
     {
       method: "POST",
       body: config
@@ -189,7 +189,7 @@ async function createAccountReportConfig(config) {
 
 async function updateAccountReportConfig(config) {
   return mercadoPagoRequest(
-    "/v1/account/settlement_report/config",
+    "/v1/account/release_report/config",
     {
       method: "PUT",
       body: config
@@ -209,8 +209,8 @@ async function requestAccountReport({
   const begin = normalizeReportDate(beginDate);
   const end = normalizeReportDate(endDate);
 
-  return mercadoPagoRequest(
-    "/v1/account/settlement_report",
+  const created = await mercadoPagoRequest(
+    "/v1/account/release_report",
     {
       method: "POST",
       body: {
@@ -219,15 +219,78 @@ async function requestAccountReport({
       }
     }
   );
+
+  if (created && created.id != null) {
+    return created;
+  }
+
+  // Algumas contas respondem 202 sem corpo. Nesse caso, busca na
+  // listagem a entrada mais recente criada manualmente para obter
+  // o id e acompanhar o processamento.
+  const result = await mercadoPagoGet(
+    "/v1/account/release_report/list"
+  );
+
+  const reports = Array.isArray(result)
+    ? result
+    : result && Array.isArray(result.results)
+      ? result.results
+      : [];
+
+  const newest = reports
+    .filter((report) => report && report.id != null)
+    .sort((a, b) => {
+      const time = (report) =>
+        new Date(
+          report.generation_date ||
+            report.last_modified ||
+            0
+        ).getTime() || 0;
+      return time(b) - time(a);
+    })[0];
+
+  if (!newest) {
+    throw new Error(
+      "Mercado Pago aceitou o pedido de relatório mas não retornou o identificador."
+    );
+  }
+
+  return newest;
 }
 
 async function getAccountReportTask(taskId) {
-  const id = encodeURIComponent(String(taskId));
-  const accessToken = encodeURIComponent(getAccessToken());
+  // O release_report nao expoe um endpoint /task/{id}. O status
+  // de um relatorio solicitado e conferido pela propria listagem:
+  // procuramos a entrada cujo id (ou report_id) bate com o job.
+  const wanted = String(taskId);
 
-  return mercadoPagoGet(
-    `/v1/account/settlement_report/task/${id}?access_token=${accessToken}`
+  const result = await mercadoPagoGet(
+    "/v1/account/release_report/list"
   );
+
+  const reports = Array.isArray(result)
+    ? result
+    : result && Array.isArray(result.results)
+      ? result.results
+      : [];
+
+  const found = reports.find((report) => {
+    if (!report) return false;
+    const id = report.id != null ? String(report.id) : "";
+    const reportId =
+      report.report_id != null ? String(report.report_id) : "";
+    return id === wanted || reportId === wanted;
+  });
+
+  if (!found) {
+    const error = new Error(
+      `Relatório ${wanted} não encontrado na listagem do Mercado Pago.`
+    );
+    error.status = 404;
+    throw error;
+  }
+
+  return found;
 }
 
 async function searchAccountReports({
@@ -244,14 +307,13 @@ async function searchAccountReports({
     100
   );
 
-  // O endpoint oficial para listar relatorios ja gerados e
-  // GET /v1/account/settlement_report/list (sem parametros de
-  // busca). O antigo "/search?range=..." nao existe na API e o
-  // Mercado Pago respondia 400 "Error validating url" ao tentar
-  // rotear a chamada internamente. O filtro por data agora e
-  // feito aqui, do nosso lado.
+  // Endpoint oficial para listar relatorios ja gerados do
+  // relatorio de Liberacoes / Dinheiro em conta (release_report),
+  // que e o unico que registra Pix recebidos direto por chave.
+  // Nao aceita parametros de busca; o filtro por data e feito
+  // aqui, do nosso lado.
   const result = await mercadoPagoGet(
-    "/v1/account/settlement_report/list"
+    "/v1/account/release_report/list"
   );
 
   const reports = Array.isArray(result)
@@ -287,7 +349,7 @@ async function searchAccountReports({
 
 async function downloadAccountReport(fileName) {
   return mercadoPagoRequest(
-    `/v1/account/settlement_report/${encodeURIComponent(fileName)}`,
+    `/v1/account/release_report/${encodeURIComponent(fileName)}`,
     {
       responseType: "text"
     }
