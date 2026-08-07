@@ -244,29 +244,45 @@ async function searchAccountReports({
     100
   );
 
-  const end = new Date();
-  const begin = new Date(
-    end.getTime() - safeDays * 24 * 60 * 60_000
-  );
-
-  const normalize = (value) =>
-    value.toISOString().replace(/\.\d{3}Z$/, "Z");
-
-  const query = new URLSearchParams({
-    range: "date_created",
-    range_begin_date: normalize(begin),
-    range_end_date: normalize(end),
-    limit: String(safeLimit),
-    offset: "0"
-  });
-
+  // O endpoint oficial para listar relatorios ja gerados e
+  // GET /v1/account/settlement_report/list (sem parametros de
+  // busca). O antigo "/search?range=..." nao existe na API e o
+  // Mercado Pago respondia 400 "Error validating url" ao tentar
+  // rotear a chamada internamente. O filtro por data agora e
+  // feito aqui, do nosso lado.
   const result = await mercadoPagoGet(
-    `/v1/account/settlement_report/search?${query}`
+    "/v1/account/settlement_report/list"
   );
 
-  return result && Array.isArray(result.results)
-    ? result.results
-    : [];
+  const reports = Array.isArray(result)
+    ? result
+    : result && Array.isArray(result.results)
+      ? result.results
+      : [];
+
+  const cutoffMs =
+    Date.now() - safeDays * 24 * 60 * 60_000;
+
+  const reportDateMs = (report) => {
+    const raw =
+      (report && report.generation_date) ||
+      (report && report.last_modified) ||
+      (report && report.end_date) ||
+      (report && report.begin_date) ||
+      "";
+
+    const time = new Date(raw).getTime();
+    return Number.isFinite(time) ? time : 0;
+  };
+
+  return reports
+    .filter(
+      (report) => reportDateMs(report) >= cutoffMs
+    )
+    .sort(
+      (a, b) => reportDateMs(b) - reportDateMs(a)
+    )
+    .slice(0, safeLimit);
 }
 
 async function downloadAccountReport(fileName) {
