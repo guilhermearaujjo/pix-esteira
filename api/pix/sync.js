@@ -361,6 +361,8 @@ async function importLatestAvailableReport() {
   let imported = 0;
   let pixFound = 0;
   let processed = 0;
+  let candidates = 0;
+  const listed = reports.length;
 
   for (const report of reports) {
     const fileName = String(
@@ -369,15 +371,25 @@ async function importLatestAvailableReport() {
 
     const providerStatus = String(
       (report && report.status) || ""
-    );
+    ).toLowerCase();
+
+    // Um relatório é baixável quando já tem arquivo gerado
+    // (file_name) e não está claramente em preparação ou com
+    // falha. Aceitar apenas o status "processed" fazia o MP ser
+    // ignorado quando respondia variações como "available".
+    if (!fileName) {
+      continue;
+    }
 
     if (
-      !fileName ||
-      providerStatus.toLowerCase() !==
-        "processed"
+      /pending|processing|in_progress|waiting|queue|failed|error|cancel/.test(
+        providerStatus
+      )
     ) {
       continue;
     }
+
+    candidates += 1;
 
     if (
       await reportFileAlreadyImported(report)
@@ -436,7 +448,13 @@ async function importLatestAvailableReport() {
     }
   }
 
-  return { imported, pixFound, processed };
+  return {
+    imported,
+    pixFound,
+    processed,
+    listed,
+    candidates
+  };
 }
 
 function reportQuotaReached(error) {
@@ -559,6 +577,8 @@ async function runReportPipeline() {
     processed: 0,
     failed: 0,
     configAction: "skipped",
+    listed: 0,
+    candidates: 0,
     requested: false,
     pending: false,
     limited: false,
@@ -599,6 +619,10 @@ async function runReportPipeline() {
       availableReportImport.pixFound;
     result.processed +=
       availableReportImport.processed;
+    result.listed =
+      availableReportImport.listed;
+    result.candidates =
+      availableReportImport.candidates;
 
     const reportRequest =
       await requestReportIfNeeded(
@@ -766,6 +790,8 @@ module.exports = async (req, res) => {
       reportLimited: report.limited,
       reportRetryAt: report.retryAt,
       reportWarning: report.warning,
+      reportsListed: report.listed,
+      reportCandidates: report.candidates,
       reportPermissionDenied:
         report.permissionDenied
     });
@@ -784,7 +810,9 @@ module.exports = async (req, res) => {
       reportPending: report.pending,
       reportLimited: report.limited,
       reportRetryAt: report.retryAt,
-      reportWarning: report.warning
+      reportWarning: report.warning,
+      reportsListed: report.listed,
+      reportCandidates: report.candidates
     });
   } catch (error) {
     console.error("[pix/sync]", error);
