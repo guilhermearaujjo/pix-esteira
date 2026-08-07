@@ -1,16 +1,19 @@
 const crypto = require("node:crypto");
 
+// Colunas do relatório de LIBERAÇÕES / Dinheiro em conta
+// (release_report). É este relatório — e não o de Liquidações —
+// que registra Pix recebidos direto na conta por chave.
 const REQUIRED_COLUMNS = [
+  "DATE",
   "SOURCE_ID",
-  "PAYMENT_METHOD_TYPE",
+  "DESCRIPTION",
+  "NET_CREDIT_AMOUNT",
+  "NET_DEBIT_AMOUNT",
+  "GROSS_AMOUNT",
+  "MP_FEE_AMOUNT",
   "PAYMENT_METHOD",
-  "TRANSACTION_TYPE",
-  "TRANSACTION_AMOUNT",
-  "TRANSACTION_CURRENCY",
-  "TRANSACTION_DATE",
-  "SETTLEMENT_NET_AMOUNT",
-  "SETTLEMENT_DATE",
-  "OPERATION_TAGS"
+  "PAYMENT_METHOD_TYPE",
+  "TRANSACTION_APPROVAL_DATE"
 ];
 
 function reportConfig(existing = null) {
@@ -22,26 +25,24 @@ function reportConfig(existing = null) {
     : [];
   const columnKeys = [...new Set([...previousColumns, ...REQUIRED_COLUMNS])];
 
+  // Campos aceitos pela configuração do release_report. Preserva
+  // o que já existe na conta e só garante nossas colunas.
   return {
     file_name_prefix: String(
       previous.file_name_prefix || "pix-esteira"
     ).slice(0, 60),
-    show_fee_prevision: Boolean(previous.show_fee_prevision),
-    show_chargeback_cancel:
-      previous.show_chargeback_cancel === undefined
-        ? true
-        : Boolean(previous.show_chargeback_cancel),
-    coupon_detailed: Boolean(previous.coupon_detailed),
-    include_withdraw: Boolean(previous.include_withdraw),
-    shipping_detail: Boolean(previous.shipping_detail),
-    refund_detailed: Boolean(previous.refund_detailed),
+    include_withdrawal_at_end: Boolean(previous.include_withdrawal_at_end),
+    execute_after_withdrawal: Boolean(previous.execute_after_withdrawal),
     display_timezone: String(previous.display_timezone || "GMT-03"),
-    header_language: String(previous.header_language || "pt"),
     separator: previous.separator === "," ? "," : ";",
     frequency:
       previous.frequency && typeof previous.frequency === "object"
         ? previous.frequency
         : { hour: 0, type: "monthly", value: 1 },
+    ...(Array.isArray(previous.notification_email_list) &&
+    previous.notification_email_list.length
+      ? { notification_email_list: previous.notification_email_list }
+      : {}),
     columns: columnKeys.map((key) => ({ key }))
   };
 }
@@ -135,42 +136,47 @@ function safeSourceId(row) {
     .createHash("sha256")
     .update(
       [
-        row.TRANSACTION_DATE,
-        row.SETTLEMENT_DATE,
-        row.TRANSACTION_AMOUNT,
-        row.SETTLEMENT_NET_AMOUNT,
+        row.DATE,
+        row.TRANSACTION_APPROVAL_DATE,
+        row.NET_CREDIT_AMOUNT,
+        row.GROSS_AMOUNT,
         row.PAYMENT_METHOD,
-        row.TRANSACTION_TYPE
+        row.DESCRIPTION
       ].join("|")
     )
     .digest("hex")
     .slice(0, 28);
 }
 
+// Descrições de linha que representam dinheiro ENTRANDO por Pix.
+// Linhas internas (reserve_for_payout, payout, withdrawal etc.)
+// nunca casam com o filtro de método Pix, mas a allowlist é uma
+// segunda barreira contra estornos e movimentações internas.
+const CREDIT_DESCRIPTIONS = /^(payment|transfer|pix_transfer|pix)$/i;
+
 function normalizeAccountReportRow(row) {
-  const transactionType = String(row.TRANSACTION_TYPE || "").toUpperCase();
+  const description = String(row.DESCRIPTION || "").trim();
   const methodType = String(row.PAYMENT_METHOD_TYPE || "").toLowerCase();
   const method = String(row.PAYMENT_METHOD || "").toLowerCase();
-  const tags = String(row.OPERATION_TAGS || "").toUpperCase();
 
-  const isIncoming = transactionType === "SETTLEMENT";
   const isPix =
     method === "pix" ||
     methodType === "pix" ||
-    methodType === "bank_transfer" ||
-    tags.includes("PIX");
+    methodType === "bank_transfer";
 
-  const netAmount = numberFromReport(row.SETTLEMENT_NET_AMOUNT);
-  const grossAmount = numberFromReport(row.TRANSACTION_AMOUNT);
-  const amount = netAmount > 0 ? netAmount : grossAmount;
+  const credit = numberFromReport(row.NET_CREDIT_AMOUNT);
+  const gross = numberFromReport(row.GROSS_AMOUNT);
+  const amount = credit > 0 ? credit : gross;
+
   const approvedAtRaw = String(
-    row.SETTLEMENT_DATE || row.TRANSACTION_DATE || ""
+    row.TRANSACTION_APPROVAL_DATE || row.DATE || ""
   ).trim();
   const approvedAt = new Date(approvedAtRaw);
 
   if (
-    !isIncoming ||
+    credit <= 0 ||
     !isPix ||
+    !CREDIT_DESCRIPTIONS.test(description) ||
     amount <= 0 ||
     !approvedAtRaw ||
     Number.isNaN(approvedAt.getTime())
