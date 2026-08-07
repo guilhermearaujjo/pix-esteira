@@ -157,7 +157,7 @@ async function searchPayments({
 async function getAccountReportConfig() {
   try {
     return await mercadoPagoGet(
-      "/v1/account/release_report/config"
+      "/v1/account/bank_report/config"
     );
   } catch (error) {
     const configurationMissing =
@@ -179,7 +179,7 @@ async function getAccountReportConfig() {
 
 async function createAccountReportConfig(config) {
   return mercadoPagoRequest(
-    "/v1/account/release_report/config",
+    "/v1/account/bank_report/config",
     {
       method: "POST",
       body: config
@@ -189,7 +189,7 @@ async function createAccountReportConfig(config) {
 
 async function updateAccountReportConfig(config) {
   return mercadoPagoRequest(
-    "/v1/account/release_report/config",
+    "/v1/account/bank_report/config",
     {
       method: "PUT",
       body: config
@@ -210,7 +210,7 @@ async function requestAccountReport({
   const end = normalizeReportDate(endDate);
 
   const created = await mercadoPagoRequest(
-    "/v1/account/release_report",
+    "/v1/account/bank_report",
     {
       method: "POST",
       body: {
@@ -228,7 +228,7 @@ async function requestAccountReport({
   // listagem a entrada mais recente criada manualmente para obter
   // o id e acompanhar o processamento.
   const result = await mercadoPagoGet(
-    "/v1/account/release_report/list"
+    "/v1/account/bank_report/list"
   );
 
   const reports = Array.isArray(result)
@@ -259,13 +259,13 @@ async function requestAccountReport({
 }
 
 async function getAccountReportTask(taskId) {
-  // O release_report nao expoe um endpoint /task/{id}. O status
+  // O bank_report nao expoe um endpoint /task/{id}. O status
   // de um relatorio solicitado e conferido pela propria listagem:
   // procuramos a entrada cujo id (ou report_id) bate com o job.
   const wanted = String(taskId);
 
   const result = await mercadoPagoGet(
-    "/v1/account/release_report/list"
+    "/v1/account/bank_report/list"
   );
 
   const reports = Array.isArray(result)
@@ -308,12 +308,12 @@ async function searchAccountReports({
   );
 
   // Endpoint oficial para listar relatorios ja gerados do
-  // relatorio de Liberacoes / Dinheiro em conta (release_report),
+  // relatorio de Dinheiro em conta (bank_report),
   // que e o unico que registra Pix recebidos direto por chave.
   // Nao aceita parametros de busca; o filtro por data e feito
   // aqui, do nosso lado.
   const result = await mercadoPagoGet(
-    "/v1/account/release_report/list"
+    "/v1/account/bank_report/list"
   );
 
   const reports = Array.isArray(result)
@@ -349,7 +349,7 @@ async function searchAccountReports({
 
 async function downloadAccountReport(fileName) {
   return mercadoPagoRequest(
-    `/v1/account/release_report/${encodeURIComponent(fileName)}`,
+    `/v1/account/bank_report/${encodeURIComponent(fileName)}`,
     {
       responseType: "text"
     }
