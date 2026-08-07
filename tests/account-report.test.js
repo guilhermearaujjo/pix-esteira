@@ -7,33 +7,49 @@ const {
   reportConfig
 } = require("../utils/account-report");
 
-test("converte uma entrada Pix do relatório em recebimento", () => {
+const HEADER =
+  "DATE;SOURCE_ID;DESCRIPTION;NET_CREDIT_AMOUNT;NET_DEBIT_AMOUNT;GROSS_AMOUNT;MP_FEE_AMOUNT;TAXES_AMOUNT;PAYMENT_METHOD;TRANSACTION_APPROVAL_DATE;BUSINESS_UNIT;SUB_UNIT;BALANCE_AMOUNT;PAYMENT_METHOD_TYPE;PURCHASE_ID";
+
+test("converte um Pix recebido do relatório de liberações em recebimento", () => {
   const csv = [
-    "SOURCE_ID;PAYMENT_METHOD_TYPE;PAYMENT_METHOD;TRANSACTION_TYPE;TRANSACTION_AMOUNT;TRANSACTION_DATE;SETTLEMENT_NET_AMOUNT;SETTLEMENT_DATE;OPERATION_TAGS",
-    "pix-123;bank_transfer;pix;SETTLEMENT;0,01;2026-07-30T15:10:00.000-03:00;0,01;2026-07-30T15:10:01.000-03:00;PIX"
+    HEADER,
+    "2026-08-07T16:00:35.000-03:00;171683166589;payment;0.01;0.00;0.01;0.00;0.00;pix;2026-08-07T16:00:35.000-03:00;;;0.06;bank_transfer;"
   ].join("\n");
 
   const receipts = parseAccountReport(csv);
   assert.equal(receipts.length, 1);
-  assert.equal(receipts[0].id, "mp_pix-123");
+  assert.equal(receipts[0].id, "mp_171683166589");
   assert.equal(receipts[0].amountCents, 1);
   assert.equal(receipts[0].payerName, "Pix recebido");
   assert.equal(receipts[0].source, "Extrato Mercado Pago");
 });
 
-test("ignora cartão, saída e valores negativos", () => {
+test("ignora saldo inicial, movimentações internas e débitos", () => {
   const csv = [
-    "SOURCE_ID;PAYMENT_METHOD_TYPE;PAYMENT_METHOD;TRANSACTION_TYPE;TRANSACTION_AMOUNT;TRANSACTION_DATE;SETTLEMENT_NET_AMOUNT;SETTLEMENT_DATE;OPERATION_TAGS",
-    "card-1;credit_card;visa;SETTLEMENT;10.00;2026-07-30T15:10:00Z;9.50;2026-07-30T15:10:00Z;",
-    "pix-out;bank_transfer;pix;PAYOUT;-20.00;2026-07-30T15:11:00Z;-20.00;2026-07-30T15:11:00Z;PIX"
+    HEADER,
+    "2026-07-15T00:00:00.000-03:00;;;0.00;0.00;0.00;0.00;0.00;;;;;0.00;;",
+    "2026-07-19T13:16:01.000-03:00;168694364037;reserve_for_payout;0.00;200.00;-200.00;0.00;0.00;available_money;2026-07-19T13:16:01.000-03:00;;;0.00;;",
+    "2026-07-19T13:16:02.000-03:00;168694364037;reserve_for_payout;200.00;0.00;200.00;0.00;0.00;available_money;2026-07-19T13:16:02.000-03:00;;;200.00;;",
+    "2026-07-20T10:00:00.000-03:00;999;payout;0.00;50.00;-50.00;0.00;0.00;pix;2026-07-20T10:00:00.000-03:00;;;150.00;bank_transfer;"
   ].join("\n");
 
   assert.deepEqual(parseAccountReport(csv), []);
 });
 
+test("aceita Pix do checkout com desconto de taxa (valor líquido)", () => {
+  const csv = [
+    HEADER,
+    "2026-07-19T12:48:09.000-03:00;168691345877;payment;199.00;0.00;200.00;1.00;0.00;pix;2026-07-19T12:48:09.000-03:00;;;199.00;bank_transfer;"
+  ].join("\n");
+
+  const receipts = parseAccountReport(csv);
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].amountCents, 19900);
+});
+
 test("parser aceita campos CSV entre aspas", () => {
   const rows = parseDelimited(
-    'SOURCE_ID;DESCRIPTION;TRANSACTION_AMOUNT\n1;"Texto; com separador";2.50'
+    'SOURCE_ID;DESCRIPTION;GROSS_AMOUNT\n1;"Texto; com separador";2.50'
   );
 
   assert.equal(rows.length, 1);
@@ -41,12 +57,10 @@ test("parser aceita campos CSV entre aspas", () => {
 });
 
 test("aceita valores com formatação brasileira ou internacional", () => {
-  const header =
-    "SOURCE_ID;PAYMENT_METHOD_TYPE;PAYMENT_METHOD;TRANSACTION_TYPE;TRANSACTION_AMOUNT;TRANSACTION_DATE;SETTLEMENT_NET_AMOUNT;SETTLEMENT_DATE;OPERATION_TAGS";
   const csv = [
-    header,
-    "br;bank_transfer;pix;SETTLEMENT;1.234,56;2026-07-30T15:10:00Z;1.234,56;2026-07-30T15:10:00Z;PIX",
-    "us;bank_transfer;pix;SETTLEMENT;1,234.56;2026-07-30T15:11:00Z;1,234.56;2026-07-30T15:11:00Z;PIX"
+    HEADER,
+    "2026-07-30T15:10:00Z;br;payment;1.234,56;0,00;1.234,56;0,00;0,00;pix;2026-07-30T15:10:00Z;;;1.234,56;bank_transfer;",
+    "2026-07-30T15:11:00Z;us;payment;1,234.56;0.00;1,234.56;0.00;0.00;pix;2026-07-30T15:11:00Z;;;1,234.56;bank_transfer;"
   ].join("\n");
 
   const receipts = parseAccountReport(csv);
@@ -68,6 +82,7 @@ test("configuração preserva colunas existentes e adiciona as necessárias", ()
   assert.equal(config.file_name_prefix, "relatorio-atual");
   assert.equal(config.separator, ",");
   assert(keys.includes("DESCRIPTION"));
+  assert(keys.includes("NET_CREDIT_AMOUNT"));
   assert(keys.includes("PAYMENT_METHOD_TYPE"));
   assert.equal(configNeedsUpdate(existing), true);
   assert.equal(configNeedsUpdate(config), false);
