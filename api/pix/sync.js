@@ -72,6 +72,25 @@ function authorized(req) {
   );
 }
 
+// Detecta erros de credencial/permissão do Mercado Pago
+// (token inválido, expirado, ou aplicação sem o escopo
+// necessário — ex.: "Relatórios" para o settlement report).
+function mpPermissionError(error) {
+  if (!error) {
+    return false;
+  }
+
+  const status = Number(error.status || 0);
+  const message = String(error.message || "");
+
+  return (
+    status === 401 ||
+    status === 403 ||
+    /PA_UNAUTHORIZED|policy.?agent|unauthorized|invalid.?token|expired.?token/i
+      .test(message)
+  );
+}
+
 async function ensureReportConfiguration() {
   const existing =
     await getAccountReportConfig();
@@ -158,8 +177,6 @@ async function processReadyReports(pendingJobs) {
 
   // Limite de jobs verificados por execução: evita estourar o
   // maxDuration (30s) do Vercel quando a fila de jobs acumula.
-  // Os jobs não vistos nesta rodada continuam pendentes e serão
-  // conferidos na próxima sincronização.
   const REPORT_JOBS_PER_RUN = 6;
   const jobsToCheck = pendingJobs.slice(
     0,
@@ -169,14 +186,8 @@ async function processReadyReports(pendingJobs) {
     pendingJobs.length - jobsToCheck.length;
 
   for (const job of jobsToCheck) {
-    // Cada job agora tem seu próprio try/catch "à prova de tudo":
-    // um erro (de rede, do Mercado Pago, de parsing do CSV etc.)
-    // em UM job nunca mais derruba a sincronização inteira. Antes,
-    // apenas erro 404 era tolerado — qualquer outro erro (400 de
-    // tarefa expirada, 429, timeout...) fazia o /api/pix/sync
-    // inteiro falhar com 500, mesmo que os outros jobs estivessem
-    // OK. Isso explica o botão "Sincronizar" falhando sempre que
-    // havia um job problemático na fila.
+    // Cada job tem seu próprio try/catch: um erro em UM job
+    // nunca derruba a sincronização inteira.
     try {
       const report = await getAccountReportTask(
         job.id
@@ -297,9 +308,13 @@ async function processReadyReports(pendingJobs) {
 
       stillPending += 1;
     } catch (error) {
-      // Job com problema (tarefa expirada de vez, erro do MP,
-      // rede etc.): marca como falho e SEGUE para o próximo job
-      // em vez de derrubar toda a sincronização.
+      // Erro de permissão vale para a conta toda: não adianta
+      // tentar os próximos jobs — propaga para o fail-soft
+      // do pipeline de relatórios.
+      if (mpPermissionError(error)) {
+        throw error;
+      }
+
       failed += 1;
 
       const status =
@@ -370,12 +385,6 @@ async function importLatestAvailableReport() {
       continue;
     }
 
-    // Cada relatório candidato tem seu próprio try/catch: se o
-    // Mercado Pago rejeitar UM arquivo específico (por exemplo,
-    // relatórios gerados manualmente pelo painel do MP às vezes
-    // respondem 400 "Error validating url..." ao serem baixados
-    // por aqui), isso não pode derrubar a sincronização inteira
-    // nem travar o processamento dos relatórios seguintes.
     try {
       const csv =
         await downloadAccountReport(fileName);
@@ -399,16 +408,16 @@ async function importLatestAvailableReport() {
       pixFound += receipts.length;
       processed += 1;
     } catch (error) {
+      if (mpPermissionError(error)) {
+        throw error;
+      }
+
       console.error(
         "[pix/sync] falha ao baixar/importar relatório",
         fileName,
         error
       );
 
-      // Marca como "resolvido" mesmo tendo falhado, só para
-      // parar de tentar baixar esse mesmo arquivo problemático
-      // a cada sincronização. O detalhe do erro fica registrado
-      // para investigação.
       await markReportFileImported(report, {
         rowsAccepted: 0,
         imported: 0,
@@ -533,6 +542,107 @@ async function requestReportIfNeeded(
   };
 }
 
+// ---------------------------------------------------------------
+// PIPELINE DE RELATÓRIOS (fail-soft)
+//
+// Todo o fluxo de extrato/settlement report do Mercado Pago roda
+// aqui dentro, protegido: se a conta não tiver a permissão de
+// "Relatórios" (erro 401/403 PolicyAgent), ou qualquer outra
+// etapa do extrato falhar, a sincronização principal de
+// pagamentos NÃO é derrubada. O painel recebe ok:true com um
+// aviso em `reportWarning` em vez de um erro 500.
+// ---------------------------------------------------------------
+async function runReportPipeline() {
+  const result = {
+    imported: 0,
+    pixFound: 0,
+    processed: 0,
+    failed: 0,
+    configAction: "skipped",
+    requested: false,
+    pending: false,
+    limited: false,
+    retryAt: null,
+    warning: null,
+    permissionDenied: false
+  };
+
+  try {
+    const reportConfiguration =
+      await ensureReportConfiguration();
+
+    result.configAction =
+      reportConfiguration.action;
+
+    const pendingJobs =
+      await listPendingReportJobs();
+
+    const reportImport =
+      await processReadyReports(
+        pendingJobs
+      );
+
+    result.imported +=
+      reportImport.imported;
+    result.pixFound +=
+      reportImport.pixFound;
+    result.processed +=
+      reportImport.processed;
+    result.failed = reportImport.failed;
+
+    const availableReportImport =
+      await importLatestAvailableReport();
+
+    result.imported +=
+      availableReportImport.imported;
+    result.pixFound +=
+      availableReportImport.pixFound;
+    result.processed +=
+      availableReportImport.processed;
+
+    const reportRequest =
+      await requestReportIfNeeded(
+        reportImport.stillPending,
+        result.processed
+      );
+
+    result.requested =
+      Boolean(reportRequest.requested);
+    result.limited =
+      Boolean(reportRequest.limited);
+    result.retryAt =
+      reportRequest.retryAt || null;
+    result.pending =
+      reportRequest.pending > 0 ||
+      reportImport.stillPending > 0;
+
+    return result;
+  } catch (error) {
+    console.error(
+      "[pix/sync] pipeline de relatórios falhou",
+      error
+    );
+
+    result.permissionDenied =
+      mpPermissionError(error);
+
+    result.warning =
+      result.permissionDenied
+        ? "A conta do Mercado Pago não liberou acesso aos relatórios de extrato para este token (permissão \"Relatórios\" da aplicação). Os pagamentos Pix do checkout continuam sendo sincronizados normalmente."
+        : "O extrato do Mercado Pago falhou nesta rodada, mas os pagamentos Pix foram conferidos normalmente. Detalhe: " +
+          ((error && error.message) ||
+            String(error)).slice(0, 200);
+
+    // Garante que o painel não fique em polling esperando um
+    // relatório que nunca vai chegar.
+    result.pending = false;
+    result.limited = false;
+    result.retryAt = null;
+
+    return result;
+  }
+}
+
 module.exports = async (req, res) => {
   applyCors(
     req,
@@ -570,18 +680,53 @@ module.exports = async (req, res) => {
     });
   }
 
+  const minutes = Math.min(
+    Math.max(
+      Number(req.query.minutes || 120),
+      5
+    ),
+    10080
+  );
+
+  // -------------------------------------------------------------
+  // 1) Sincronização principal: busca de pagamentos aprovados.
+  //    Se ISTO falhar, aí sim o botão deve mostrar erro — e com
+  //    uma mensagem que diz exatamente o que verificar.
+  // -------------------------------------------------------------
+  let payments;
+
   try {
-    const minutes = Math.min(
-      Math.max(
-        Number(req.query.minutes || 120),
-        5
-      ),
-      10080
+    payments =
+      await searchPayments({ minutes });
+  } catch (error) {
+    console.error(
+      "[pix/sync] busca de pagamentos falhou",
+      error
     );
 
-    const payments =
-      await searchPayments({ minutes });
+    if (mpPermissionError(error)) {
+      return res.status(502).json({
+        ok: false,
+        error:
+          "O Mercado Pago recusou o token de acesso.",
+        detail:
+          "Verifique a variável MP_ACCESS_TOKEN no Vercel: use o Access Token de PRODUÇÃO da conta correta, gerado em uma aplicação com permissão de leitura de pagamentos. Resposta do MP: " +
+          ((error && error.message) ||
+            String(error)).slice(0, 200)
+      });
+    }
 
+    return res.status(502).json({
+      ok: false,
+      error:
+        "Erro ao conferir pagamentos no Mercado Pago.",
+      detail:
+        (error && error.message) ||
+        String(error)
+    });
+  }
+
+  try {
     let pixApproved = 0;
     let imported = 0;
 
@@ -600,59 +745,29 @@ module.exports = async (req, res) => {
       }
     }
 
-    const reportConfiguration =
-      await ensureReportConfiguration();
+    // -----------------------------------------------------------
+    // 2) Pipeline de relatórios: totalmente fail-soft.
+    // -----------------------------------------------------------
+    const report =
+      await runReportPipeline();
 
-    const pendingJobs =
-      await listPendingReportJobs();
-
-    const reportImport =
-      await processReadyReports(
-        pendingJobs
-      );
-
-    imported += reportImport.imported;
-
-    const availableReportImport =
-      await importLatestAvailableReport();
-
-    imported +=
-      availableReportImport.imported;
-
-    const reportsProcessed =
-      reportImport.processed +
-      availableReportImport.processed;
-
-    const reportPixFound =
-      reportImport.pixFound +
-      availableReportImport.pixFound;
-
-    const reportRequest =
-      await requestReportIfNeeded(
-        reportImport.stillPending,
-        reportsProcessed
-      );
-
-    const reportPending =
-      reportRequest.pending > 0 ||
-      reportImport.stillPending > 0;
+    imported += report.imported;
 
     await markSync({
       checkedPayments: payments.length,
       pixApproved,
       imported,
       minutes,
-      reportConfig:
-        reportConfiguration.action,
-      reportPixFound,
-      reportsProcessed,
-      reportsFailed:
-        reportImport.failed,
-      reportPending,
-      reportLimited:
-        Boolean(reportRequest.limited),
-      reportRetryAt:
-        reportRequest.retryAt || null
+      reportConfig: report.configAction,
+      reportPixFound: report.pixFound,
+      reportsProcessed: report.processed,
+      reportsFailed: report.failed,
+      reportPending: report.pending,
+      reportLimited: report.limited,
+      reportRetryAt: report.retryAt,
+      reportWarning: report.warning,
+      reportPermissionDenied:
+        report.permissionDenied
     });
 
     return res.status(200).json({
@@ -661,19 +776,15 @@ module.exports = async (req, res) => {
       pixApproved,
       imported,
       minutes,
-      reportConfig:
-        reportConfiguration.action,
-      reportPixFound,
-      reportsProcessed,
-      reportsFailed:
-        reportImport.failed,
-      reportRequested:
-        reportRequest.requested,
-      reportPending,
-      reportLimited:
-        Boolean(reportRequest.limited),
-      reportRetryAt:
-        reportRequest.retryAt || null
+      reportConfig: report.configAction,
+      reportPixFound: report.pixFound,
+      reportsProcessed: report.processed,
+      reportsFailed: report.failed,
+      reportRequested: report.requested,
+      reportPending: report.pending,
+      reportLimited: report.limited,
+      reportRetryAt: report.retryAt,
+      reportWarning: report.warning
     });
   } catch (error) {
     console.error("[pix/sync]", error);
