@@ -181,9 +181,19 @@ async function reportFileAlreadyImported(report) {
     .doc(reportFileDocumentId(report))
     .get();
 
+  if (!snapshot.exists) {
+    return false;
+  }
+
+  const data = snapshot.data();
+
+  // Um relatório cujo download falhou fica registrado (com o
+  // detalhe do erro), mas NÃO conta como importado: a próxima
+  // sincronização tenta de novo. Antes ele era pulado para
+  // sempre após uma única falha transitória.
   return (
-    snapshot.exists &&
-    snapshot.data().status === "imported"
+    data.status === "imported" &&
+    !data.downloadFailed
   );
 }
 
