@@ -21,6 +21,31 @@ function cleanName(value) {
   return text;
 }
 
+// "NU PAGAMENTOS S.A. - INSTITUIÇÃO DE PAGAMENTO" → "Nu Pagamentos"
+function prettyInstitution(rawName) {
+  let name = String(rawName || "").split(" - ")[0].trim();
+
+  name = name
+    .replace(/\b(S[./]?A[.]?|LTDA[.]?|EIRELI|EPP|ME)\b/gi, "")
+    .replace(/\b(INSTITUI[ÇC][ÃA]O DE PAGAMENTO|BANCO M[ÚU]LTIPLO|CR[ÉE]DITO FINANCIAMENTO E INVESTIMENTO)\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/[\s,.-]+$/g, "")
+    .trim();
+
+  if (!name) return String(rawName || "").trim();
+
+  const smallWords = new Set(["de", "da", "do", "das", "dos", "e"]);
+  return name
+    .toLowerCase()
+    .split(" ")
+    .map((word, index) =>
+      smallWords.has(word) && index > 0
+        ? word
+        : word.charAt(0).toUpperCase() + word.slice(1)
+    )
+    .join(" ");
+}
+
 function resolvePayerName(payment) {
   const firstName = cleanName(readNested(payment, "payer", "first_name"));
   const lastName = cleanName(readNested(payment, "payer", "last_name"));
@@ -38,7 +63,11 @@ function resolvePayerName(payment) {
     .join(" ");
   if (additionalName) return additionalName;
 
-  // Em Pix, o nome real do pagador costuma vir aqui, sem máscara.
+  // Em Pix recebido por transferência, a API do Mercado Pago não
+  // expõe o nome da pessoa (todos os campos vêm null/mascarados,
+  // por privacidade). O que vem legível é a INSTITUIÇÃO do
+  // pagador em bank_info.payer.long_name — exibida de forma
+  // amigável: "Pix recebido · Nu Pagamentos".
   const bankInfoName =
     cleanName(
       readNested(
@@ -60,7 +89,9 @@ function resolvePayerName(payment) {
         "name"
       )
     );
-  if (bankInfoName) return bankInfoName;
+  if (bankInfoName) {
+    return `Pix recebido · ${prettyInstitution(bankInfoName)}`;
+  }
 
   return (
     cleanName(readNested(payment, "payer", "email")) ||
