@@ -499,6 +499,22 @@ async function requestReportIfNeeded(
   if (
     nextReportRequestAtMs > Date.now()
   ) {
+    const unavailable =
+      state.requestUnavailable === true ||
+      /indispon/i.test(
+        String(state.providerError || "")
+      );
+
+    // Bloqueio por indisponibilidade do recurso (POST 404) é
+    // silencioso: não é "limite diário", então não há o que
+    // avisar no painel a cada clique.
+    if (unavailable) {
+      return {
+        requested: false,
+        pending: 0
+      };
+    }
+
     return {
       requested: false,
       pending: 0,
@@ -540,6 +556,7 @@ async function requestReportIfNeeded(
         nextReportRequestAtMs: retryAtMs,
         nextReportRequestAt:
           new Date(retryAtMs).toISOString(),
+        requestUnavailable: true,
         providerError:
           "Geração de extrato via API indisponível para esta conta (404). " +
           (error.message || "")
@@ -566,6 +583,7 @@ async function requestReportIfNeeded(
       nextReportRequestAtMs: retryAtMs,
       nextReportRequestAt:
         new Date(retryAtMs).toISOString(),
+      requestUnavailable: false,
       providerError:
         error.message || String(error)
     });
