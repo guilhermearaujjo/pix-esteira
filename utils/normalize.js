@@ -11,27 +11,61 @@ function readNested(object, ...path) {
   return value;
 }
 
+// O Mercado Pago mascara o nome do pagador na API em Pix
+// recebidos por transferência (vem literalmente "XXXXXXXXXXX").
+// Valores assim contam como vazios para não poluir o painel.
+function cleanName(value) {
+  const text = readText(value);
+  if (!text) return "";
+  if (/^[xX*•.\s]+$/.test(text)) return "";
+  return text;
+}
+
 function resolvePayerName(payment) {
-  const firstName = readText(readNested(payment, "payer", "first_name"));
-  const lastName = readText(readNested(payment, "payer", "last_name"));
+  const firstName = cleanName(readNested(payment, "payer", "first_name"));
+  const lastName = cleanName(readNested(payment, "payer", "last_name"));
   const fullName = [firstName, lastName].filter(Boolean).join(" ");
   if (fullName) return fullName;
 
-  const additionalFirst = readText(
+  const additionalFirst = cleanName(
     readNested(payment, "additional_info", "payer", "first_name")
   );
-  const additionalLast = readText(
+  const additionalLast = cleanName(
     readNested(payment, "additional_info", "payer", "last_name")
   );
   const additionalName = [additionalFirst, additionalLast]
     .filter(Boolean)
     .join(" ");
+  if (additionalName) return additionalName;
+
+  // Em Pix, o nome real do pagador costuma vir aqui, sem máscara.
+  const bankInfoName =
+    cleanName(
+      readNested(
+        payment,
+        "point_of_interaction",
+        "transaction_data",
+        "bank_info",
+        "payer",
+        "long_name"
+      )
+    ) ||
+    cleanName(
+      readNested(
+        payment,
+        "point_of_interaction",
+        "transaction_data",
+        "bank_info",
+        "payer",
+        "name"
+      )
+    );
+  if (bankInfoName) return bankInfoName;
 
   return (
-    additionalName ||
-    readText(readNested(payment, "payer", "email")) ||
-    readText(readNested(payment, "metadata", "payer_name")) ||
-    "Pagador não informado"
+    cleanName(readNested(payment, "payer", "email")) ||
+    cleanName(readNested(payment, "metadata", "payer_name")) ||
+    "Pix recebido"
   );
 }
 
