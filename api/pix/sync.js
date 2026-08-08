@@ -45,6 +45,12 @@ const REPORT_RETRY_AFTER_MS =
 const REPORT_QUOTA_COOLDOWN_MS =
   12 * 60 * 60_000;
 
+// Contas em que o Mercado Pago não permite GERAR o extrato via
+// API (POST responde 404 not_found). Listar e baixar relatórios
+// continuam funcionando; só a solicitação fica em pausa longa.
+const REPORT_UNSUPPORTED_COOLDOWN_MS =
+  7 * 24 * 60 * 60_000;
+
 function authorized(req) {
   const authorization = String(
     req.headers.authorization || ""
@@ -525,6 +531,29 @@ async function requestReportIfNeeded(
     report =
       await requestAccountReport(period);
   } catch (error) {
+    if (error && error.status === 404) {
+      const retryAtMs =
+        Date.now() +
+        REPORT_UNSUPPORTED_COOLDOWN_MS;
+
+      await markReportRequestBlocked({
+        nextReportRequestAtMs: retryAtMs,
+        nextReportRequestAt:
+          new Date(retryAtMs).toISOString(),
+        providerError:
+          "Geração de extrato via API indisponível para esta conta (404). " +
+          (error.message || "")
+      });
+
+      // Sem aviso no painel: os Pix chegam pela busca de
+      // pagamentos e pelo webhook; relatórios gerados
+      // manualmente continuam sendo importados pela listagem.
+      return {
+        requested: false,
+        pending: 0
+      };
+    }
+
     if (!reportQuotaReached(error)) {
       throw error;
     }
